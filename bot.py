@@ -38,4 +38,4 @@ def start(message):
     if user_id not in users:
         users[user_id] = {"count": 0, "name": message.from_user.first_name}
     bot.send_message(user_id,
-        f"Salom, {me
+        f"Salom, {message.from_user.first_name}! 👋\n\n"
