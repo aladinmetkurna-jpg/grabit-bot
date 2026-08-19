@@ -23,6 +23,15 @@ users = {}
 channels = []
 LIMIT = 20
 
+# Rasm kengaytmalari (video bo'lmasa shular tekshiriladi)
+IMAGE_EXTENSIONS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif"
+)
+
 # Bir foydalanuvchining bir vaqtning o'zida
 # ikkita download boshlashini oldini oladi.
 user_locks = {}
@@ -128,10 +137,11 @@ def start(message):
 
     bot.send_message(
         user_id,
-        "👋🏻 Assalomu alaykum!\n\n"
-        "Instagram, TikTok, YouTube va Pinterest "
-        "havolalaridan video yuklab beraman.\n\n"
-        "📥 Linkni yuboring.",
+        "👋🏻 Assalomu aleykum. Men sizga Instagram, Tiktok, "
+        "Youtube va Pinterestdan video va rasimlani yuklashda "
+        "yordam beraman.\n\n"
+        "• Videoni yuklashim uchun video yoki photoni "
+        "havolasini menga jo'nating",
         reply_markup=markup
     )
 
@@ -511,7 +521,7 @@ def find_file(folder):
     if not files:
         return None
 
-    # Avval MP4
+    # Avval MP4 (video)
     mp4 = [
         f for f in files
         if f.lower().endswith(".mp4")
@@ -524,10 +534,47 @@ def find_file(folder):
             key=os.path.getsize
         )
 
+    # Keyin boshqa video kengaytmalari
+    video_ext = (
+        ".mkv",
+        ".webm",
+        ".mov",
+        ".avi"
+    )
+
+    videos = [
+        f for f in files
+        if f.lower().endswith(video_ext)
+    ]
+
+    if videos:
+
+        return max(
+            videos,
+            key=os.path.getsize
+        )
+
+    # Keyin rasm
+    images = [
+        f for f in files
+        if f.lower().endswith(IMAGE_EXTENSIONS)
+    ]
+
+    if images:
+
+        return max(
+            images,
+            key=os.path.getsize
+        )
+
     return max(
         files,
         key=os.path.getsize
     )
+
+
+def is_image_file(path):
+    return path.lower().endswith(IMAGE_EXTENSIONS)
 
 
 # =========================================================
@@ -617,7 +664,8 @@ def download(message):
 
         ydl_opts = {
 
-            # VIDEO + AUDIO
+            # VIDEO + AUDIO (rasm bo'lsa, yt-dlp
+            # to'g'ridan-to'g'ri rasm faylini oladi)
             "format": (
                 "bestvideo*+bestaudio/"
                 "best"
@@ -651,6 +699,9 @@ def download(message):
             "restrictfilenames": True,
 
             # FFmpeg orqali video + audio
+            # (rasm fayllarga taalluqli emas,
+            # yt-dlp video bo'lmasa buni avtomatik
+            # o'tkazib yuboradi)
             "postprocessors": [
                 {
                     "key": "FFmpegVideoConvertor",
@@ -663,14 +714,96 @@ def download(message):
             ydl_opts
         ) as ydl:
 
-            ydl.extract_info(
+            info = ydl.extract_info(
                 url,
                 download=True
             )
 
         # ---------------------------------
-        # FAYL
+        # Pinterest/Instagram albom (bir nechta rasm)
         # ---------------------------------
+
+        entries = None
+
+        if isinstance(info, dict) and info.get("entries"):
+            entries = [
+                e for e in info["entries"]
+                if e
+            ]
+
+        # ---------------------------------
+        # FAYL(LAR)
+        # ---------------------------------
+
+        if entries and len(entries) > 1:
+
+            all_files = []
+
+            for name in os.listdir(temp_dir):
+
+                path = os.path.join(temp_dir, name)
+
+                if not os.path.isfile(path):
+                    continue
+
+                if name.endswith((".part", ".ytdl")):
+                    continue
+
+                all_files.append(path)
+
+            if not all_files:
+                raise Exception("Fayllar topilmadi.")
+
+            media_group = []
+
+            for path in all_files[:10]:
+
+                filesize = os.path.getsize(path)
+
+                if filesize > 49 * 1024 * 1024:
+                    continue
+
+                with open(path, "rb") as f:
+                    data = f.read()
+
+                if is_image_file(path):
+
+                    media_group.append(
+                        telebot.types.InputMediaPhoto(data)
+                    )
+
+                else:
+
+                    media_group.append(
+                        telebot.types.InputMediaVideo(data)
+                    )
+
+            if media_group:
+
+                bot.send_media_group(
+                    user_id,
+                    media_group
+                )
+
+                users[user_id]["count"] += 1
+
+            else:
+
+                raise Exception(
+                    "Fayllar juda katta (50 MB dan oshgan)."
+                )
+
+            try:
+
+                bot.delete_message(
+                    user_id,
+                    status_message.message_id
+                )
+
+            except Exception:
+                pass
+
+            return
 
         filename = find_file(
             temp_dir
@@ -679,22 +812,26 @@ def download(message):
         if not filename:
 
             raise Exception(
-                "Video topilmadi."
+                "Video yoki rasm topilmadi."
             )
 
         filesize = os.path.getsize(
             filename
         )
 
-        # Telegram Bot API cheklovi
+        # Telegram Bot API cheklovi — fayl katta bo'lsa,
+        # hech qanday xabar chiqarmasdan to'xtaymiz
         if filesize > 49 * 1024 * 1024:
 
-            bot.edit_message_text(
-                "❌ Video juda katta "
-                "(50 MB dan oshgan).",
-                user_id,
-                status_message.message_id
-            )
+            try:
+
+                bot.delete_message(
+                    user_id,
+                    status_message.message_id
+                )
+
+            except Exception:
+                pass
 
             return
 
@@ -702,16 +839,30 @@ def download(message):
         # YUBORISH
         # ---------------------------------
 
-        with open(
-            filename,
-            "rb"
-        ) as video:
+        if is_image_file(filename):
 
-            bot.send_video(
-                user_id,
-                video,
-                supports_streaming=True
-            )
+            with open(
+                filename,
+                "rb"
+            ) as photo:
+
+                bot.send_photo(
+                    user_id,
+                    photo
+                )
+
+        else:
+
+            with open(
+                filename,
+                "rb"
+            ) as video:
+
+                bot.send_video(
+                    user_id,
+                    video,
+                    supports_streaming=True
+                )
 
         users[user_id]["count"] += 1
 
@@ -726,28 +877,20 @@ def download(message):
         except Exception:
             pass
 
-    except Exception as error:
+    except Exception:
 
-        text = str(error)
-
-        if len(text) > 1200:
-            text = text[-1200:]
+        # Xato bo'lsa, foydalanuvchiga hech narsa
+        # ko'rsatilmaydi — status xabar shunchaki o'chiriladi.
 
         try:
 
-            bot.edit_message_text(
-                "❌ Yuklab bo'lmadi:\n\n"
-                + text,
+            bot.delete_message(
                 user_id,
                 status_message.message_id
             )
 
         except Exception:
-
-            bot.send_message(
-                user_id,
-                "❌ Yuklab bo'lmadi."
-            )
+            pass
 
     finally:
 
@@ -772,4 +915,4 @@ bot.infinity_polling(
     skip_pending=True,
     timeout=30,
     long_polling_timeout=30
-)
+    )
