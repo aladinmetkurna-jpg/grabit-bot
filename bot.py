@@ -1,13 +1,18 @@
-import telebot
-import yt_dlp
 import os
 import tempfile
 import shutil
 import threading
-import time
+
+import telebot
+import yt_dlp
+
+
+# =========================================================
+# SOZLAMALAR
+# =========================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-ADMIN_ID = os.environ.get("ADMIN_ID", "")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "").replace("@", "").lower()
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN topilmadi!")
@@ -18,25 +23,53 @@ users = {}
 channels = []
 LIMIT = 20
 
-# Har bir user uchun bir vaqtning o'zida faqat 1 ta download
+# Bir foydalanuvchining bir vaqtning o'zida
+# ikkita download boshlashini oldini oladi.
 user_locks = {}
-user_locks_global = threading.Lock()
+locks_global = threading.Lock()
 
 
-def get_user_lock(uid):
-    with user_locks_global:
-        if uid not in user_locks:
-            user_locks[uid] = threading.Lock()
-        return user_locks[uid]
+# =========================================================
+# USER LOCK
+# =========================================================
 
+def get_user_lock(user_id):
+    with locks_global:
+        if user_id not in user_locks:
+            user_locks[user_id] = threading.Lock()
+
+        return user_locks[user_id]
+
+
+# =========================================================
+# ADMIN TEKSHIRISH
+# =========================================================
+
+def is_admin(message):
+    username = message.from_user.username
+
+    if not username:
+        return False
+
+    return username.lower() == ADMIN_USERNAME
+
+
+# =========================================================
+# OBUNA TEKSHIRISH
+# =========================================================
 
 def check_sub(user_id):
+
     if not channels:
         return True
 
-    for ch in channels:
+    for channel in channels:
+
         try:
-            member = bot.get_chat_member(ch, user_id)
+            member = bot.get_chat_member(
+                channel,
+                user_id
+            )
 
             if member.status in ["left", "kicked"]:
                 return False
@@ -48,13 +81,15 @@ def check_sub(user_id):
 
 
 def sub_markup():
+
     markup = telebot.types.InlineKeyboardMarkup()
 
-    for i, ch in enumerate(channels):
+    for i, channel in enumerate(channels):
+
         markup.add(
             telebot.types.InlineKeyboardButton(
                 "Kanal " + str(i + 1),
-                url="https://t.me/" + ch.replace("@", "")
+                url="https://t.me/" + channel.replace("@", "")
             )
         )
 
@@ -68,16 +103,19 @@ def sub_markup():
     return markup
 
 
-# =========================
+# =========================================================
 # START
-# =========================
+# =========================================================
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    uid = message.chat.id
 
-    if uid not in users:
-        users[uid] = {"count": 0}
+    user_id = message.chat.id
+
+    if user_id not in users:
+        users[user_id] = {
+            "count": 0
+        }
 
     markup = telebot.types.InlineKeyboardMarkup()
 
@@ -88,28 +126,24 @@ def start(message):
         )
     )
 
-    text = (
-        "👋🏻 Assalomu alaykum!\n\n"
-        "Men Instagram, TikTok, YouTube va Pinterest'dan "
-        "video va rasmlarni yuklab beraman.\n\n"
-        "📥 Yuklash uchun shunchaki havolani yuboring.\n\n"
-        "Bot guruhlarda ham ishlaydi."
-    )
-
     bot.send_message(
-        uid,
-        text,
+        user_id,
+        "👋🏻 Assalomu alaykum!\n\n"
+        "Instagram, TikTok, YouTube va Pinterest "
+        "havolalaridan video yuklab beraman.\n\n"
+        "📥 Linkni yuboring.",
         reply_markup=markup
     )
 
 
-# =========================
-# ADMIN
-# =========================
+# =========================================================
+# ADMIN PANEL
+# =========================================================
 
 @bot.message_handler(commands=["admin"])
 def admin(message):
-    if str(message.chat.id) != str(ADMIN_ID):
+
+    if not is_admin(message):
         return
 
     markup = telebot.types.InlineKeyboardMarkup()
@@ -144,36 +178,42 @@ def admin(message):
 
     markup.add(
         telebot.types.InlineKeyboardButton(
-            "🔢 Limit o'zgartirish",
+            "🔢 Limit",
             callback_data="set_limit"
         )
     )
 
     bot.send_message(
         message.chat.id,
-        "⚙️ Admin Panel",
+        "⚙️ <b>Admin Panel</b>",
+        parse_mode="HTML",
         reply_markup=markup
     )
 
 
-# =========================
+# =========================================================
 # CALLBACK
-# =========================
+# =========================================================
 
 @bot.callback_query_handler(func=lambda call: True)
-def cb(call):
+def callback(call):
+
     global LIMIT
 
-    uid = call.message.chat.id
+    user_id = call.message.chat.id
+
+    # ---------------------------------
+    # OBUNA
+    # ---------------------------------
 
     if call.data == "check_sub":
 
-        if check_sub(uid):
+        if check_sub(user_id):
 
-            if uid not in users:
-                users[uid] = {"count": 0}
+            if user_id not in users:
+                users[user_id] = {"count": 0}
 
-            users[uid]["count"] = 0
+            users[user_id]["count"] = 0
 
             bot.answer_callback_query(
                 call.id,
@@ -181,8 +221,9 @@ def cb(call):
             )
 
             bot.send_message(
-                uid,
-                "✅ Obuna tasdiqlandi.\n\nLink yuboring."
+                user_id,
+                "✅ Obuna tasdiqlandi.\n\n"
+                "Link yuboring."
             )
 
         else:
@@ -192,32 +233,63 @@ def cb(call):
                 "❌ Hali obuna bo'lmagansiz!"
             )
 
-    elif call.data == "stats":
+        return
+
+    # ---------------------------------
+    # ADMIN CALLBACKLARI
+    # ---------------------------------
+
+    if not is_admin(call.message):
+        bot.answer_callback_query(
+            call.id,
+            "❌ Ruxsat yo'q!"
+        )
+        return
+
+    # ---------------------------------
+    # STATISTIKA
+    # ---------------------------------
+
+    if call.data == "stats":
 
         bot.answer_callback_query(call.id)
 
         bot.send_message(
-            uid,
-            "📊 Statistika\n\n"
-            "Foydalanuvchilar: " + str(len(users)) + "\n"
-            "Kanallar: " + str(len(channels)) + "\n"
-            "Limit: " + str(LIMIT)
+            user_id,
+            "📊 <b>Statistika</b>\n\n"
+            "👥 Foydalanuvchilar: "
+            + str(len(users))
+            + "\n"
+            "📢 Kanallar: "
+            + str(len(channels))
+            + "\n"
+            "🔢 Limit: "
+            + str(LIMIT),
+            parse_mode="HTML"
         )
+
+    # ---------------------------------
+    # KANAL QO'SHISH
+    # ---------------------------------
 
     elif call.data == "add_ch":
 
         bot.answer_callback_query(call.id)
 
         msg = bot.send_message(
-            uid,
+            user_id,
             "Kanal username yozing:\n\n"
             "Misol: @kanalim"
         )
 
         bot.register_next_step_handler(
             msg,
-            save_ch
+            save_channel
         )
+
+    # ---------------------------------
+    # KANALLAR
+    # ---------------------------------
 
     elif call.data == "list_ch":
 
@@ -226,7 +298,7 @@ def cb(call):
         if not channels:
 
             bot.send_message(
-                uid,
+                user_id,
                 "❌ Kanallar yo'q!"
             )
 
@@ -234,54 +306,67 @@ def cb(call):
 
             markup = telebot.types.InlineKeyboardMarkup()
 
-            for ch in channels:
+            for channel in channels:
+
                 markup.add(
                     telebot.types.InlineKeyboardButton(
-                        "🗑 O'chirish: " + ch,
-                        callback_data="del_" + ch
+                        "🗑 " + channel,
+                        callback_data="delete:" + channel
                     )
                 )
 
             bot.send_message(
-                uid,
+                user_id,
                 "📋 Kanallar:",
                 reply_markup=markup
             )
+
+    # ---------------------------------
+    # BROADCAST
+    # ---------------------------------
 
     elif call.data == "broadcast":
 
         bot.answer_callback_query(call.id)
 
         msg = bot.send_message(
-            uid,
-            "📢 Xabar yozing:"
+            user_id,
+            "📢 Yuboriladigan xabarni yozing:"
         )
 
         bot.register_next_step_handler(
             msg,
-            do_broadcast
+            broadcast
         )
+
+    # ---------------------------------
+    # LIMIT
+    # ---------------------------------
 
     elif call.data == "set_limit":
 
         bot.answer_callback_query(call.id)
 
         msg = bot.send_message(
-            uid,
+            user_id,
             "🔢 Yangi limitni yozing:"
         )
 
         bot.register_next_step_handler(
             msg,
-            update_limit
+            set_limit
         )
 
-    elif call.data.startswith("del_"):
+    # ---------------------------------
+    # KANAL O'CHIRISH
+    # ---------------------------------
 
-        ch = call.data.replace("del_", "", 1)
+    elif call.data.startswith("delete:"):
 
-        if ch in channels:
-            channels.remove(ch)
+        channel = call.data.split(":", 1)[1]
+
+        if channel in channels:
+            channels.remove(channel)
 
         bot.answer_callback_query(
             call.id,
@@ -289,94 +374,114 @@ def cb(call):
         )
 
         bot.send_message(
-            uid,
-            ch + " o'chirildi!"
+            user_id,
+            channel + " o'chirildi!"
         )
 
 
-# =========================
-# ADMIN FUNCTIONS
-# =========================
+# =========================================================
+# KANAL SAQLASH
+# =========================================================
 
-def save_ch(message):
-    ch = message.text.strip()
+def save_channel(message):
 
-    if not ch.startswith("@"):
-        ch = "@" + ch
+    if not is_admin(message):
+        return
 
-    if ch not in channels:
+    channel = message.text.strip()
 
-        channels.append(ch)
+    if not channel.startswith("@"):
+        channel = "@" + channel
+
+    if channel not in channels:
+
+        channels.append(channel)
 
         bot.send_message(
             message.chat.id,
-            ch + " qo'shildi!"
+            channel + " qo'shildi!"
         )
 
     else:
 
         bot.send_message(
             message.chat.id,
-            "❌ Allaqachon mavjud!"
+            "❌ Bu kanal allaqachon mavjud!"
         )
 
 
-def do_broadcast(message):
+# =========================================================
+# BROADCAST
+# =========================================================
+
+def broadcast(message):
+
+    if not is_admin(message):
+        return
+
     text = message.text
+    sent = 0
 
-    ok = 0
-
-    for uid in list(users.keys()):
+    for user_id in list(users.keys()):
 
         try:
+
             bot.send_message(
-                uid,
+                user_id,
                 text
             )
 
-            ok += 1
+            sent += 1
 
         except Exception:
             pass
 
     bot.send_message(
         message.chat.id,
-        str(ok) + " ta foydalanuvchiga yuborildi!"
+        str(sent) + " ta foydalanuvchiga yuborildi!"
     )
 
 
-def update_limit(message):
+# =========================================================
+# LIMIT
+# =========================================================
+
+def set_limit(message):
+
     global LIMIT
+
+    if not is_admin(message):
+        return
 
     try:
 
-        LIMIT = int(message.text)
+        value = int(message.text)
 
-        if LIMIT < 1:
+        if value < 1:
             raise ValueError
+
+        LIMIT = value
 
         bot.send_message(
             message.chat.id,
-            "✅ Limit " + str(LIMIT) + " ga o'zgartirildi!"
+            "✅ Limit "
+            + str(LIMIT)
+            + " ga o'zgartirildi!"
         )
 
     except Exception:
 
         bot.send_message(
             message.chat.id,
-            "❌ To'g'ri raqam yozing!"
+            "❌ Faqat raqam yozing!"
         )
 
 
-# =========================
-# FILE FINDER
-# =========================
+# =========================================================
+# FAYLNI TOPISH
+# =========================================================
 
-def find_downloaded_file(folder):
-    """
-    yt-dlp yaratgan yakuniy faylni topadi.
-    .part, .ytdl kabi vaqtinchalik fayllarni hisobga olmaydi.
-    """
+def find_file(folder):
 
     if not os.path.exists(folder):
         return None
@@ -385,18 +490,20 @@ def find_downloaded_file(folder):
 
     for name in os.listdir(folder):
 
-        path = os.path.join(folder, name)
+        path = os.path.join(
+            folder,
+            name
+        )
 
         if not os.path.isfile(path):
             continue
 
-        if name.endswith(".part"):
-            continue
-
-        if name.endswith(".ytdl"):
-            continue
-
-        if name.endswith(".part-Frag"):
+        if name.endswith(
+            (
+                ".part",
+                ".ytdl"
+            )
+        ):
             continue
 
         files.append(path)
@@ -404,130 +511,146 @@ def find_downloaded_file(folder):
     if not files:
         return None
 
-    # Eng katta faylni tanlaymiz
-    files.sort(
-        key=lambda x: os.path.getsize(x),
-        reverse=True
+    # Avval MP4
+    mp4 = [
+        f for f in files
+        if f.lower().endswith(".mp4")
+    ]
+
+    if mp4:
+
+        return max(
+            mp4,
+            key=os.path.getsize
+        )
+
+    return max(
+        files,
+        key=os.path.getsize
     )
 
-    return files[0]
 
-
-# =========================
+# =========================================================
 # DOWNLOAD
-# =========================
+# =========================================================
 
-@bot.message_handler(func=lambda m: True)
+@bot.message_handler(
+    func=lambda message: True
+)
 def download(message):
 
-    global LIMIT
-
-    uid = message.chat.id
+    user_id = message.chat.id
 
     if not message.text:
         return
 
     url = message.text.strip()
 
-    if not url.startswith(("http://", "https://")):
-
-        bot.send_message(
-            uid,
-            "🔗 Iltimos, link yuboring!"
+    if not url.startswith(
+        (
+            "http://",
+            "https://"
         )
-
+    ):
         return
 
-    if uid not in users:
-        users[uid] = {"count": 0}
+    if user_id not in users:
 
+        users[user_id] = {
+            "count": 0
+        }
+
+    # ---------------------------------
     # LIMIT
-    if users[uid]["count"] >= LIMIT:
+    # ---------------------------------
 
-        if not check_sub(uid):
+    if users[user_id]["count"] >= LIMIT:
+
+        if not check_sub(user_id):
 
             bot.send_message(
-                uid,
+                user_id,
                 "⛔ Kunlik limitingiz tugadi.\n\n"
-                "Davom etish uchun kanallarga obuna bo'ling:",
+                "Davom etish uchun kanallarga "
+                "obuna bo'ling:",
                 reply_markup=sub_markup()
             )
 
             return
 
-        else:
+        users[user_id]["count"] = 0
 
-            users[uid]["count"] = 0
+    # ---------------------------------
+    # LOCK
+    # ---------------------------------
 
-    # Bir userdan bir vaqtning o'zida 2 downloadni bloklash
-    lock = get_user_lock(uid)
+    lock = get_user_lock(user_id)
 
-    if not lock.acquire(blocking=False):
+    if not lock.acquire(
+        blocking=False
+    ):
 
         bot.send_message(
-            uid,
-            "⏳ Sizning boshqa linkingiz hali yuklanmoqda.\n"
-            "Iltimos, tugashini kuting."
+            user_id,
+            "⏳ Avvalgi video yuklanmoqda."
         )
 
         return
 
-    msg = None
+    status_message = None
     temp_dir = None
 
     try:
 
-        msg = bot.send_message(
-            uid,
+        status_message = bot.send_message(
+            user_id,
             "🔎 Qidirilmoqda..."
         )
 
-        # Har download uchun alohida papka
         temp_dir = tempfile.mkdtemp(
             prefix="grabit_"
         )
 
+        # ---------------------------------
+        # YT-DLP
+        # ---------------------------------
+
         ydl_opts = {
 
             # VIDEO + AUDIO
-            "format": "bv*+ba/b",
+            "format": (
+                "bestvideo*+bestaudio/"
+                "best"
+            ),
 
-            # MP4 ga birlashtirish
+            # MP4
             "merge_output_format": "mp4",
 
-            # Unique filename
+            # Fayl nomi
             "outtmpl": os.path.join(
                 temp_dir,
                 "%(id)s.%(ext)s"
             ),
 
-            # Temporary files
+            # Temporary folder
             "paths": {
                 "home": temp_dir,
                 "temp": temp_dir
             },
 
-            # Keraksiz loglarni kamaytirish
+            "noplaylist": True,
+
             "quiet": True,
             "no_warnings": True,
 
-            # Parallel fragment download
-            "concurrent_fragment_downloads": 4,
+            "retries": 5,
+            "fragment_retries": 5,
 
-            # Retry
-            "retries": 3,
-            "fragment_retries": 3,
+            "socket_timeout": 60,
 
-            # Network
-            "socket_timeout": 30,
-
-            # YouTube/Pinterest va boshqalar uchun
-            "noplaylist": True,
-
-            # Fayl nomlarini xavfsiz qilish
             "restrictfilenames": True,
 
-            # Postprocessor
+            # FFmpeg orqali video + audio
             "postprocessors": [
                 {
                     "key": "FFmpegVideoConvertor",
@@ -536,158 +659,112 @@ def download(message):
             ]
         }
 
-        # Instagram/TikTok/Pinterest kabi saytlar
-        # uchun URL ni yuklash
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(
+            ydl_opts
+        ) as ydl:
 
-            info = ydl.extract_info(
+            ydl.extract_info(
                 url,
                 download=True
             )
 
-        # Yuklangan yakuniy faylni topamiz
-        filename = find_downloaded_file(
+        # ---------------------------------
+        # FAYL
+        # ---------------------------------
+
+        filename = find_file(
             temp_dir
         )
 
         if not filename:
+
             raise Exception(
-                "Yuklangan fayl topilmadi."
+                "Video topilmadi."
             )
 
-        filesize = os.path.getsize(filename)
+        filesize = os.path.getsize(
+            filename
+        )
 
-        # Telegram bot limiti uchun
-        # juda katta faylni yuborishga urinmaymiz
+        # Telegram Bot API cheklovi
         if filesize > 49 * 1024 * 1024:
 
             bot.edit_message_text(
-                "❌ Fayl juda katta.\n\n"
-                "Telegram bot orqali 50 MB dan katta "
-                "faylni yuborib bo'lmaydi.",
-                uid,
-                msg.message_id
+                "❌ Video juda katta "
+                "(50 MB dan oshgan).",
+                user_id,
+                status_message.message_id
             )
 
             return
 
-        # Count faqat muvaffaqiyatli download'dan keyin
-        users[uid]["count"] += 1
+        # ---------------------------------
+        # YUBORISH
+        # ---------------------------------
 
-        lower = filename.lower()
+        with open(
+            filename,
+            "rb"
+        ) as video:
 
-        with open(filename, "rb") as f:
-
-            if lower.endswith(
-                (".mp4", ".webm", ".mkv", ".mov")
-            ):
-
-                bot.send_video(
-                    uid,
-                    f,
-                    supports_streaming=True
-                )
-
-            elif lower.endswith(
-                (
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp"
-                )
-            ):
-
-                bot.send_photo(
-                    uid,
-                    f
-                )
-
-            elif lower.endswith(
-                (
-                    ".mp3",
-                    ".m4a",
-                    ".aac",
-                    ".ogg",
-                    ".opus"
-                )
-            ):
-
-                bot.send_audio(
-                    uid,
-                    f
-                )
-
-            else:
-
-                bot.send_document(
-                    uid,
-                    f
-                )
-
-        # Status xabarini o'chirish
-        try:
-            bot.delete_message(
-                uid,
-                msg.message_id
+            bot.send_video(
+                user_id,
+                video,
+                supports_streaming=True
             )
+
+        users[user_id]["count"] += 1
+
+        # Statusni o'chirish
+        try:
+
+            bot.delete_message(
+                user_id,
+                status_message.message_id
+            )
+
         except Exception:
             pass
 
-    except Exception as e:
+    except Exception as error:
 
-        error = str(e)
+        text = str(error)
 
-        # Juda uzun error Telegramda noqulay
-        if len(error) > 1500:
-            error = error[-1500:]
+        if len(text) > 1200:
+            text = text[-1200:]
 
-        if msg:
+        try:
 
-            try:
+            bot.edit_message_text(
+                "❌ Yuklab bo'lmadi:\n\n"
+                + text,
+                user_id,
+                status_message.message_id
+            )
 
-                bot.edit_message_text(
-                    "❌ Yuklab bo'lmadi:\n\n"
-                    + error,
-                    uid,
-                    msg.message_id
-                )
-
-            except Exception:
-
-                bot.send_message(
-                    uid,
-                    "❌ Yuklab bo'lmadi:\n\n"
-                    + error
-                )
-
-        else:
+        except Exception:
 
             bot.send_message(
-                uid,
-                "❌ Yuklab bo'lmadi:\n\n"
-                + error
+                user_id,
+                "❌ Yuklab bo'lmadi."
             )
 
     finally:
 
-        # Temporary folderni tozalash
-        if temp_dir and os.path.exists(temp_dir):
+        # Temporary fayllarni o'chirish
+        if temp_dir:
 
-            try:
-                shutil.rmtree(
-                    temp_dir,
-                    ignore_errors=True
-                )
-            except Exception:
-                pass
+            shutil.rmtree(
+                temp_dir,
+                ignore_errors=True
+            )
 
-        # Lockni bo'shatish
         lock.release()
 
 
-# =========================
-# RUN
-# =========================
+# =========================================================
+# START BOT
+# =========================================================
 
 print("GrabIt ishga tushdi!")
 
@@ -695,4 +772,4 @@ bot.infinity_polling(
     skip_pending=True,
     timeout=30,
     long_polling_timeout=30
-    )
+)
