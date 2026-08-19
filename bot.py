@@ -2,6 +2,7 @@ import os
 import tempfile
 import shutil
 import threading
+import urllib.request
 
 import telebot
 import yt_dlp
@@ -12,7 +13,10 @@ import yt_dlp
 # =========================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "").replace("@", "").lower()
+ADMIN_USERNAME = os.environ.get(
+    "ADMIN_USERNAME",
+    "Meyaxad"
+).replace("@", "").lower()
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN topilmadi!")
@@ -31,6 +35,9 @@ IMAGE_EXTENSIONS = (
     ".webp",
     ".gif"
 )
+
+# Faqat videolar ostiga qo'yiladigan yozuv (kursiv)
+VIDEO_CAPTION = "<i>Creator: @Meyaxad</i>"
 
 # Bir foydalanuvchining bir vaqtning o'zida
 # ikkita download boshlashini oldini oladi.
@@ -130,18 +137,21 @@ def start(message):
 
     markup.add(
         telebot.types.InlineKeyboardButton(
-            "🤖 Botni guruhga qo'shish",
+            "Botni guruhga qo'shish ⤴",
             url="https://t.me/GrabIt_downloader_bot?startgroup=true"
         )
     )
 
     bot.send_message(
         user_id,
-        "👋🏻 Assalomu aleykum. Men sizga Instagram, Tiktok, "
+        "👋 Assalomu aleykum. Men sizga Instagram, Tiktok, "
         "Youtube va Pinterestdan video va rasimlani yuklashda "
         "yordam beraman.\n\n"
         "• Videoni yuklashim uchun video yoki photoni "
-        "havolasini menga jo'nating",
+        "havolasini menga jo'nating\n\n"
+        "<i>Bot guruhlarda ham ishlaydi, guruhda ham "
+        "ishlatmoqchi bo'lsangiz tugmani bosing👇</i>",
+        parse_mode="HTML",
         reply_markup=markup
     )
 
@@ -488,93 +498,91 @@ def set_limit(message):
 
 
 # =========================================================
-# FAYLNI TOPISH
+# RASM / VIDEO ANIQLASH
 # =========================================================
 
-def find_file(folder):
+def is_image_item(item):
+    """
+    Berilgan post (yoki carousel elementi) faqat rasmmi
+    yoki videomi ekanini aniqlaydi.
+    """
 
-    if not os.path.exists(folder):
-        return None
+    formats = item.get("formats")
 
-    files = []
+    if formats:
 
-    for name in os.listdir(folder):
+        # Agar formatlar orasida hech bo'lmasa bittasida
+        # video kodek bo'lsa — bu video.
+        for f in formats:
 
-        path = os.path.join(
-            folder,
-            name
-        )
+            vcodec = f.get("vcodec")
 
-        if not os.path.isfile(path):
-            continue
+            if vcodec and vcodec != "none":
+                return False
 
-        if name.endswith(
-            (
-                ".part",
-                ".ytdl"
+        return True
+
+    vcodec = item.get("vcodec")
+    ext = (item.get("ext") or "").lower()
+
+    if vcodec in (None, "none") and ("." + ext) in IMAGE_EXTENSIONS:
+        return True
+
+    return False
+
+
+def best_image_url(item):
+    """
+    Post ichidan eng sifatli (eng katta o'lchamli) rasm
+    URL manzilini va uning kengaytmasini qaytaradi.
+    """
+
+    formats = item.get("formats")
+
+    if formats:
+
+        candidates = [
+            f for f in formats
+            if f.get("url") and f.get("vcodec") in (None, "none")
+        ]
+
+        if candidates:
+
+            candidates.sort(
+                key=lambda f: (f.get("width") or 0) * (f.get("height") or 0),
+                reverse=True
             )
-        ):
-            continue
 
-        files.append(path)
+            best = candidates[0]
 
-    if not files:
-        return None
+            return best["url"], (best.get("ext") or "jpg")
 
-    # Avval MP4 (video)
-    mp4 = [
-        f for f in files
-        if f.lower().endswith(".mp4")
-    ]
+    if item.get("url"):
+        return item["url"], (item.get("ext") or "jpg")
 
-    if mp4:
+    return None, None
 
-        return max(
-            mp4,
-            key=os.path.getsize
-        )
 
-    # Keyin boshqa video kengaytmalari
-    video_ext = (
-        ".mkv",
-        ".webm",
-        ".mov",
-        ".avi"
+def download_direct(url, dest_path):
+    """
+    Rasmni ffmpeg/yt-dlp orqali emas, to'g'ridan-to'g'ri
+    URL'dan yuklaydi (rasmlar ko'pincha alohida video
+    formatga ega bo'lmagani uchun bu ancha ishonchli).
+    """
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+            )
+        }
     )
 
-    videos = [
-        f for f in files
-        if f.lower().endswith(video_ext)
-    ]
+    with urllib.request.urlopen(req, timeout=60) as response:
 
-    if videos:
-
-        return max(
-            videos,
-            key=os.path.getsize
-        )
-
-    # Keyin rasm
-    images = [
-        f for f in files
-        if f.lower().endswith(IMAGE_EXTENSIONS)
-    ]
-
-    if images:
-
-        return max(
-            images,
-            key=os.path.getsize
-        )
-
-    return max(
-        files,
-        key=os.path.getsize
-    )
-
-
-def is_image_file(path):
-    return path.lower().endswith(IMAGE_EXTENSIONS)
+        with open(dest_path, "wb") as out_file:
+            shutil.copyfileobj(response, out_file)
 
 
 # =========================================================
@@ -659,212 +667,202 @@ def download(message):
         )
 
         # ---------------------------------
-        # YT-DLP
+        # 1-BOSQICH: LINKNI TEKSHIRISH
+        # (yuklab olmasdan turib, video yoki
+        # rasm ekanini aniqlaymiz)
         # ---------------------------------
 
-        ydl_opts = {
-
-            # VIDEO + AUDIO (rasm bo'lsa, yt-dlp
-            # to'g'ridan-to'g'ri rasm faylini oladi)
-            "format": (
-                "bestvideo*+bestaudio/"
-                "best"
-            ),
-
-            # MP4
-            "merge_output_format": "mp4",
-
-            # Fayl nomi
-            "outtmpl": os.path.join(
-                temp_dir,
-                "%(id)s.%(ext)s"
-            ),
-
-            # Temporary folder
-            "paths": {
-                "home": temp_dir,
-                "temp": temp_dir
-            },
-
-            "noplaylist": True,
-
+        probe_opts = {
             "quiet": True,
             "no_warnings": True,
-
-            "retries": 5,
-            "fragment_retries": 5,
-
+            "noplaylist": True,
             "socket_timeout": 60,
-
-            "restrictfilenames": True,
-
-            # FFmpeg orqali video + audio
-            # (rasm fayllarga taalluqli emas,
-            # yt-dlp video bo'lmasa buni avtomatik
-            # o'tkazib yuboradi)
-            "postprocessors": [
-                {
-                    "key": "FFmpegVideoConvertor",
-                    "preferedformat": "mp4"
-                }
-            ]
+            "retries": 5,
         }
 
-        with yt_dlp.YoutubeDL(
-            ydl_opts
-        ) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=True
-            )
-
-        # ---------------------------------
-        # Pinterest/Instagram albom (bir nechta rasm)
-        # ---------------------------------
-
-        entries = None
+        with yt_dlp.YoutubeDL(probe_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
 
         if isinstance(info, dict) and info.get("entries"):
-            entries = [
-                e for e in info["entries"]
-                if e
-            ]
+            items = [e for e in info["entries"] if e]
+        elif isinstance(info, dict):
+            items = [info]
+        else:
+            items = []
+
+        if not items:
+            raise Exception("Hech narsa topilmadi.")
+
+        is_album = len(items) > 1
+
+        media_group = []
+        single_path = None
+        single_is_image = False
 
         # ---------------------------------
-        # FAYL(LAR)
+        # 2-BOSQICH: HAR BIR ELEMENTNI YUKLASH
         # ---------------------------------
 
-        if entries and len(entries) > 1:
+        for idx, item in enumerate(items[:10]):
 
-            all_files = []
+            if is_image_item(item):
 
-            for name in os.listdir(temp_dir):
+                # ----- RASM: to'g'ridan-to'g'ri yuklaymiz -----
 
-                path = os.path.join(temp_dir, name)
+                img_url, ext = best_image_url(item)
 
-                if not os.path.isfile(path):
+                if not img_url:
                     continue
 
-                if name.endswith((".part", ".ytdl")):
+                if ("." + ext.lower()) not in IMAGE_EXTENSIONS:
+                    ext = "jpg"
+
+                dest = os.path.join(
+                    temp_dir,
+                    "img_" + str(idx) + "." + ext
+                )
+
+                try:
+                    download_direct(img_url, dest)
+                except Exception:
                     continue
 
-                all_files.append(path)
-
-            if not all_files:
-                raise Exception("Fayllar topilmadi.")
-
-            media_group = []
-
-            for path in all_files[:10]:
-
-                filesize = os.path.getsize(path)
-
-                if filesize > 49 * 1024 * 1024:
+                if not os.path.exists(dest):
                     continue
 
-                with open(path, "rb") as f:
-                    data = f.read()
+                if os.path.getsize(dest) > 49 * 1024 * 1024:
+                    continue
 
-                if is_image_file(path):
+                if is_album:
 
-                    media_group.append(
-                        telebot.types.InputMediaPhoto(data)
+                    with open(dest, "rb") as f:
+                        media_group.append(
+                            telebot.types.InputMediaPhoto(f.read())
+                        )
+
+                else:
+
+                    single_path = dest
+                    single_is_image = True
+
+            else:
+
+                # ----- VIDEO: yt-dlp orqali yuklaymiz -----
+
+                entry_url = (
+                    item.get("webpage_url")
+                    or item.get("url")
+                    or url
+                )
+
+                video_opts = {
+                    "format": "bestvideo*+bestaudio/best",
+                    "merge_output_format": "mp4",
+                    "outtmpl": os.path.join(
+                        temp_dir,
+                        "vid_" + str(idx) + ".%(ext)s"
+                    ),
+                    "paths": {
+                        "home": temp_dir,
+                        "temp": temp_dir
+                    },
+                    "noplaylist": True,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "retries": 5,
+                    "fragment_retries": 5,
+                    "socket_timeout": 60,
+                    "restrictfilenames": True,
+                    "postprocessors": [
+                        {
+                            "key": "FFmpegVideoConvertor",
+                            "preferedformat": "mp4"
+                        }
+                    ]
+                }
+
+                try:
+
+                    with yt_dlp.YoutubeDL(video_opts) as ydl2:
+                        ydl2.download([entry_url])
+
+                except Exception:
+                    continue
+
+                vid_path = None
+
+                for name in os.listdir(temp_dir):
+
+                    if not name.startswith("vid_" + str(idx) + "."):
+                        continue
+
+                    if name.endswith((".part", ".ytdl")):
+                        continue
+
+                    vid_path = os.path.join(temp_dir, name)
+                    break
+
+                if not vid_path:
+                    continue
+
+                if os.path.getsize(vid_path) > 49 * 1024 * 1024:
+                    continue
+
+                if is_album:
+
+                    with open(vid_path, "rb") as f:
+                        media_group.append(
+                            telebot.types.InputMediaVideo(
+                                f.read(),
+                                caption=VIDEO_CAPTION,
+                                parse_mode="HTML"
+                            )
+                        )
+
+                else:
+
+                    single_path = vid_path
+                    single_is_image = False
+
+        # ---------------------------------
+        # 3-BOSQICH: YUBORISH
+        # ---------------------------------
+
+        if media_group:
+
+            bot.send_media_group(
+                user_id,
+                media_group
+            )
+
+            users[user_id]["count"] += 1
+
+        elif single_path:
+
+            with open(single_path, "rb") as f:
+
+                if single_is_image:
+
+                    bot.send_photo(
+                        user_id,
+                        f
                     )
 
                 else:
 
-                    media_group.append(
-                        telebot.types.InputMediaVideo(data)
+                    bot.send_video(
+                        user_id,
+                        f,
+                        supports_streaming=True,
+                        caption=VIDEO_CAPTION,
+                        parse_mode="HTML"
                     )
 
-            if media_group:
-
-                bot.send_media_group(
-                    user_id,
-                    media_group
-                )
-
-                users[user_id]["count"] += 1
-
-            else:
-
-                raise Exception(
-                    "Fayllar juda katta (50 MB dan oshgan)."
-                )
-
-            try:
-
-                bot.delete_message(
-                    user_id,
-                    status_message.message_id
-                )
-
-            except Exception:
-                pass
-
-            return
-
-        filename = find_file(
-            temp_dir
-        )
-
-        if not filename:
-
-            raise Exception(
-                "Video yoki rasm topilmadi."
-            )
-
-        filesize = os.path.getsize(
-            filename
-        )
-
-        # Telegram Bot API cheklovi — fayl katta bo'lsa,
-        # hech qanday xabar chiqarmasdan to'xtaymiz
-        if filesize > 49 * 1024 * 1024:
-
-            try:
-
-                bot.delete_message(
-                    user_id,
-                    status_message.message_id
-                )
-
-            except Exception:
-                pass
-
-            return
-
-        # ---------------------------------
-        # YUBORISH
-        # ---------------------------------
-
-        if is_image_file(filename):
-
-            with open(
-                filename,
-                "rb"
-            ) as photo:
-
-                bot.send_photo(
-                    user_id,
-                    photo
-                )
+            users[user_id]["count"] += 1
 
         else:
 
-            with open(
-                filename,
-                "rb"
-            ) as video:
-
-                bot.send_video(
-                    user_id,
-                    video,
-                    supports_streaming=True
-                )
-
-        users[user_id]["count"] += 1
+            raise Exception("Yuklab bo'lmadi.")
 
         # Statusni o'chirish
         try:
@@ -884,35 +882,4 @@ def download(message):
 
         try:
 
-            bot.delete_message(
-                user_id,
-                status_message.message_id
-            )
-
-        except Exception:
-            pass
-
-    finally:
-
-        # Temporary fayllarni o'chirish
-        if temp_dir:
-
-            shutil.rmtree(
-                temp_dir,
-                ignore_errors=True
-            )
-
-        lock.release()
-
-
-# =========================================================
-# START BOT
-# =========================================================
-
-print("GrabIt ishga tushdi!")
-
-bot.infinity_polling(
-    skip_pending=True,
-    timeout=30,
-    long_polling_timeout=30
-    )
+ 
